@@ -3,11 +3,15 @@
 #include <iterator>
 #include <cassert>
 #include <type_traits>
+#include <concepts>
 #include <cmath>
 #include <functional>
 #include <span>
 #include <random>
 #include <initializer_list>
+#include <bit>
+#include <array>
+#include <iostream>
 
 namespace mv
 {
@@ -25,7 +29,41 @@ namespace mv
 		return *(begin + r * C + c);
 	}
 
+	/*
+	* 00 - sizeof(T)
+	* 01 - 255 if big, 0 if little
+	* 02 - 255 if floating, 0 if integral
+	* 03 - 255 if signed integral 0 if unsigned integral
+	*/
+	template<class T> requires std::integral<T> or std::floating_point<T>
+	static constexpr std::array<std::byte, 4> platform_agnostic_type_info() {
+		std::array<std::byte, 4> result{};
+		static_assert(sizeof(T) <= 255);
+
+		result[0] = std::byte(sizeof(T));
+		result[1] = std::endian::native == std::endian::big ? std::byte(255) : std::byte(0);
+		
+		if constexpr (std::floating_point<T>) {
+			result[2] = std::byte(255);
+		}
+
+		if constexpr (std::integral<T>) {
+			if constexpr (std::signed_integral<T>) {
+				result[3] = std::byte(255);
+			}
+			if constexpr (std::unsigned_integral<T>) {
+
+			}
+		}
+		return result;
+	}
 	
+	
+	static constexpr void to_native(std::vector<std::byte>& bytes, std::endian endianness) {
+		if (endianness != std::endian::native) {
+			std::reverse(bytes.begin(), bytes.end());
+		}
+	}
 
 	template<class T, size_t R, size_t C>
 	class MatrixView
@@ -205,14 +243,12 @@ namespace mv
 			{}
 	};
 
-	
-
-	template<typename T, size_t R, size_t K, size_t C>
-	auto mat_mul(const Matrix<T, R, K>& p, const Matrix<T, K, C>& q) {
-		return Matrix<T, R, C>(
-			[&](auto i, auto j) {
+	template<typename T, size_t R1, size_t C1, size_t R2, size_t C2>
+	auto mat_mul(const Matrix<T, R1, C1>& p, const Matrix<T, R2, C2>& q) requires (C1 == R2) {
+		return Matrix<T, R1, C2>(
+			[&](size_t i, size_t j) {
 				auto res = T{};
-				for (size_t k = 0u; k < K; ++k) {
+				for (size_t k = 0u; k < C1; ++k) {
 					res += p(i, k) * q(k, j);
 				}
 				return res;
@@ -273,15 +309,25 @@ namespace mv
 
 	template<class T, size_t R, size_t C>
 	std::vector<std::byte> serialize(const Matrix<T, R, C>& m) {
-		std::vector<std::byte> result(m.rows() * m.cols() * sizeof(T) + 2 * sizeof(size_t));
+		static constexpr auto pa_ti_size_t = platform_agnostic_type_info<size_t>();
+		static constexpr auto pa_ti_T = platform_agnostic_type_info<T>();
+
+		std::vector<std::byte> result(m.rows() * m.cols() * sizeof(T) + 2 * sizeof(size_t) + sizeof(pa_ti_size_t) + sizeof(pa_ti_T));
 		size_t offset = 0;
-		const size_t rows = m.rows();
-		const size_t cols = m.cols();
+
+		std::memcpy(result.data() + offset, &pa_ti_size_t, sizeof pa_ti_size_t);
+		offset += sizeof pa_ti_size_t;
+
+		static constexpr size_t rows = m.rows();
+		static constexpr size_t cols = m.cols();
 		std::memcpy(result.data() + offset, &rows, sizeof(size_t));
 		offset += sizeof(size_t);
 
 		std::memcpy(result.data() + offset, &cols, sizeof(size_t));
 		offset += sizeof(size_t);
+
+		std::memcpy(result.data() + offset, &pa_ti_T, sizeof pa_ti_T);
+		offset += sizeof pa_ti_T;
 
 		for (const auto& v : m.data) {
 			std::memcpy(result.data() + offset, &v, sizeof(T));
@@ -293,22 +339,108 @@ namespace mv
 
 	template<class T, size_t R, size_t C>
 	auto deserialize(const std::vector<std::byte>& bytes) {
-		auto res = mv::Matrix<T, R, C>(T(0));
-		size_t rows;
-		size_t cols;
+
 		size_t offset = 0;
-		std::memcpy(&rows, bytes.data() + offset, sizeof(size_t));
-		offset += sizeof(size_t);
 
-		std::memcpy(&cols, bytes.data() + offset, sizeof(size_t));
-		offset += sizeof(size_t);
+		std::array<std::byte, 4>pa_ti_size_t{};
+		std::memcpy(&pa_ti_size_t, bytes.data() + offset, sizeof pa_ti_size_t);
+		offset += sizeof pa_ti_size_t;
 
-		for (size_t i = 0; i < res.data.size(); ++i, offset += sizeof(T)) {
-			std::memcpy(res.data.data() + i, bytes.data() + offset, sizeof(T));
+		const auto sizeof_size_t = std::to_integer<size_t>(pa_ti_size_t[0]);
+		const auto size_t_endianness = std::to_integer<bool>(pa_ti_size_t[1]) ? std::endian::big : std::endian::little;
+		const bool is_integral = not std::to_integer<bool>(pa_ti_size_t[2]);
+		const bool is_unsigned = not std::to_integer<bool>(pa_ti_size_t[3]);
+
+
+		if (sizeof_size_t > sizeof(size_t)) {
+			throw std::logic_error("data type inside file is too wide");
+		}
+		if (not is_unsigned) {
+			throw std::logic_error("not implemented");
+		}
+		if (not is_integral) {
+			throw std::logic_error("data type inside file was not an integer");
+		}
+
+		std::vector<std::byte>size_t_bytes(sizeof_size_t);
+
+		std::memcpy(size_t_bytes.data(), bytes.data() + offset, sizeof_size_t);
+		offset += sizeof_size_t;
+		to_native(size_t_bytes, size_t_endianness);
+		size_t rows{};
+		std::memcpy(&rows, size_t_bytes.data(), sizeof_size_t);
+
+		std::memcpy(size_t_bytes.data(), bytes.data() + offset, sizeof_size_t);
+		offset += sizeof_size_t;
+		to_native(size_t_bytes, size_t_endianness);
+		size_t cols{};
+		std::memcpy(&cols, size_t_bytes.data(), sizeof_size_t);
+
+
+		if (rows != R or cols != C) {
+			throw std::logic_error("");
+		}
+
+		std::array<std::byte, 4>pa_ti_T{};
+		std::memcpy(&pa_ti_T, bytes.data() + offset, sizeof pa_ti_T);
+		offset += sizeof pa_ti_T;
+
+		const auto sizeof_T = std::to_integer<size_t>(pa_ti_T[0]);
+		const auto T_endianness = std::to_integer<bool>(pa_ti_T[1]) ? std::endian::big : std::endian::little;
+		const bool is_float = std::to_integer<bool>(pa_ti_T[2]);
+
+		if (sizeof(T) != sizeof_T) {
+			throw std::logic_error("data type in file has different width than data type in Matrix");
+		}
+
+		if (std::floating_point<T> != is_float) {
+			throw std::logic_error("data types are different, one if float and one is not");
+		}
+
+		std::vector<std::byte>T_bytes(sizeof_T);
+
+		auto res = mv::Matrix<T, R, C>(T(0));
+				
+		for (size_t i = 0; i < res.data.size(); ++i, offset += sizeof_T) {
+			std::memcpy(T_bytes.data(), bytes.data() + offset, sizeof_T);
+			to_native(T_bytes, T_endianness);
+			std::memcpy(res.data.data() + i, T_bytes.data(), sizeof_T);
 		}
 		return res;
 	}
 
+	
+	template<typename T, size_t R>
+	using ColVector = Matrix<T, R, 1>;
+
+	template<typename T, size_t C>
+	using RowVector = Matrix<T, 1, C>;
+
+
+	template<typename T, size_t R, size_t C>
+	std::pair<size_t, size_t> argmax(const Matrix<T, R, C>& m) {
+		size_t r = 0;
+		size_t c = 0;
+		for(size_t i = 0; i < R; ++i)
+			for (size_t j = 0; j < C; ++j) {
+				if (m(i, j) > m(r, c)) {
+					r = i;
+					c = j;
+				}
+			}
+
+		return std::make_pair(r, c);
+	}
+
+	template<typename T, size_t R>
+	size_t argmax(const ColVector<T, R>& v) {
+		return argmax<T, R, 1>(v).first;
+	}
+
+	template<typename T, size_t C>
+	size_t argmax(const RowVector<T, C>& v) {
+		return argmax<T, 1, C>(v).second;
+	}
 
 	class MatrixFunction
 	{
@@ -426,7 +558,10 @@ namespace mv
 				return [](const Matrix<X, R, C>& x) {
 					return x.apply([](X x) {return X(3) * x * x; });
 					};
+			default:
+				throw std::logic_error("Provided nonexisting function id");
 			}
+			
 		}
 
 		template<class X, size_t R, size_t C>
@@ -482,5 +617,35 @@ namespace mv
 		{}
 
 		std::uint8_t id;
+	};
+
+	
+	
+	class Random {
+		
+	public:
+		static auto& engine() {
+			static std::mt19937 gen{ std::random_device()() };
+			return gen;
+		}
+
+		static void set_seed(std::uint_least32_t seed) {
+			Random::engine().seed(seed);
+		}
+
+		template<std::integral Int>
+		static Int uniform_distribution(Int a, Int b) {
+			return std::uniform_int_distribution<Int>(a, b)(Random::engine());
+		}
+
+		template<std::floating_point Float>
+		static Float uniform_distribution(Float a, Float b) {
+			return std::uniform_real_distribution<Float>(a, b)(Random::engine());
+		}
+
+		template<std::floating_point Float>
+		static Float normal_distribution(Float mean = Float(0), Float stddev = Float(1)) {
+			return std::normal_distribution<Float>(mean, stddev)(Random::engine());
+		}
 	};
 }
