@@ -1,6 +1,6 @@
 import tkinter as tk
 import numpy as np
-from PIL import Image, ImageDraw, ImageGrab
+from PIL import Image, ImageDraw
 import cv2
 from neural_network import NeuralNetwork, relu, softmax
 
@@ -8,7 +8,7 @@ from neural_network import NeuralNetwork, relu, softmax
 class PaintApp:
     def __init__(self, root, model_path: str):
         self.root = root
-        self.root.title("Simple Paint")
+        self.root.title("Handwritten digits recognition demo")
         
         self.canvas = tk.Canvas(root, width=400, height=400, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
@@ -41,8 +41,8 @@ class PaintApp:
     def paint(self, event):
         x1, y1 = event.x, event.y
         if self.x0 and self.y0:
-            self.canvas.create_line(self.x0, self.y0, x1, y1, width=7)
-            self.draw.line([self.x0, self.y0, x1, y1], fill='black',width=7)
+            self.canvas.create_line(self.x0, self.y0, x1, y1, width=6)
+            self.draw.line([self.x0, self.y0, x1, y1], fill='black',width=6)
 
         self.x0 = x1
         self.y0 = y1
@@ -59,18 +59,14 @@ class PaintApp:
         I = I.astype(float) / 255
         I = -I + 1
 
-        I = cv2.dilate(I, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4,4)))
-        kernel = np.ones((7,7)) / 4
-        I = cv2.filter2D(I, -1, kernel)
-
         c_row = np.nonzero(np.sum(I > 0.7, 0))
         c_col = np.nonzero(np.sum(I > 0.7, 1))
 
         min_x, max_x = c_row[0][0], c_row[0][-1]
         min_y, max_y = c_col[0][0], c_col[0][-1]
         
-        dx = 10
-        dy = 10
+        dx = 40
+        dy = 40
         min_x = max(0, min_x - dx)
         max_x = min(400, max_x + dx)
 
@@ -78,6 +74,14 @@ class PaintApp:
         max_y = min(400, max_y + dy)
 
         I = I[min_y:max_y,min_x:max_x]
+
+        I = cv2.dilate(I, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2)))
+        I = cv2.dilate(I, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2)))
+        kernel = np.ones((2,2)) / 4
+        I = cv2.filter2D(I, -1, kernel)
+        I = cv2.filter2D(I, -1, kernel)
+
+
         I = cv2.resize(I, (28, 28))
 
         for r in range(28):
@@ -112,7 +116,7 @@ def float_to_char(v):
 
 def main():
     root = tk.Tk()
-    app = PaintApp(root, 'models/nn_200_005_1.nn')
+    app = PaintApp(root, 'models/nn_H500_B100_MB5.nn')
     root.mainloop()
 
 if __name__ == "__main__":
